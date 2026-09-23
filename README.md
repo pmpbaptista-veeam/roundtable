@@ -16,7 +16,7 @@ No infrastructure to run. The message bus and the memory are one plain git repo.
 ## Install (Claude Code)
 
 ```
-/plugin marketplace add <git-url-of-this-repo>
+/plugin marketplace add pmpbaptista-veeam/roundtable
 /plugin install roundtable@roundtable
 ```
 
@@ -26,7 +26,7 @@ Or copy the skill by hand (the folder name must be `roundtable`):
 cp -R plugins/roundtable/skills/roundtable ~/.claude/skills/roundtable
 ```
 
-On claude.ai, upload `roundtable-skill.zip` from the release page under
+On claude.ai, upload `roundtable-skill.zip` from the [latest release](https://github.com/pmpbaptista-veeam/roundtable/releases/latest) under
 Settings → Capabilities → Skills.
 
 Requirements: `git` and Python 3.8+. The CLI uses only the standard library.
