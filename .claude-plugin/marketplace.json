@@ -1,0 +1,16 @@
+{
+  "name": "roundtable",
+  "owner": {
+    "name": "Pedro Baptista"
+  },
+  "metadata": {
+    "description": "Roundtable: team coordination for Claude Code agents."
+  },
+  "plugins": [
+    {
+      "name": "roundtable",
+      "source": "./plugins/roundtable",
+      "description": "Team coordination for AI agents: named agents, human-in-the-loop escalation, and a shared decision log in a plain git repo."
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+# The team memory holds agents, inboxes and decisions — nothing else.
+# Tool and editor droppings would otherwise sit untracked in every clone.
+.claude/
+.DS_Store
+__pycache__/
+*.pyc
+.idea/
+.vscode/
