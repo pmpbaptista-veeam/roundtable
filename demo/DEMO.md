@@ -46,7 +46,7 @@ You are agent ada. Who's on the team, and has anyone already decided anything ab
 **Left, type:**
 
 ```
-We want to permanently delete report exports older than 30 days. Get it decided and recorded for the team.
+Report exports are ours alone. We want to permanently delete exports older than 30 days. Get it decided and recorded for the team.
 ```
 
 *ada sees that the delete can't be undone, files a **blocking** question to `pedro.baptista` with a safe default ("don't purge"), and starts waiting. The watcher on the right picks it up.*
@@ -62,7 +62,7 @@ We want to permanently delete report exports older than 30 days. Get it decided 
 ```bash
 python3 $C inbox --as pedro.baptista
 python3 $C answer --id <paste Q-id> --as pedro.baptista \
-  --answer "Approved, but keep 90 days, not 30. Snapshot the table before the first run."
+  --answer "Approved, but keep 90 days, not 30."
 ```
 
 > I don't need to be in the agent's session. I answer from my own machine, and
