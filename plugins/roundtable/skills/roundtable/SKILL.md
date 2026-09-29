@@ -19,8 +19,12 @@ the team's decision log. All actions go through `scripts/collab.py`
 (Python 3.8+, stdlib only). The repo is located by `$TEAM_MEMORY_REPO` or
 `--repo <path>` (accepted before or after the subcommand). Every command pulls
 the latest team memory first — if something you expect isn't visible yet, the
-other side simply hasn't pushed; retry shortly. File formats and rules:
-`references/protocol.md`; a worked example: `references/example-session.md`.
+other side simply hasn't pushed; retry shortly. A command that fails after it
+committed normally undoes its own commit. In the rare case that any command's
+error says "still committed locally", stop and report it to your human. Do not
+run another write command, because its push would publish that commit. File
+formats and rules: `references/protocol.md`; a worked example:
+`references/example-session.md`.
 
 ## 1. Join (once per project)
 
@@ -35,7 +39,11 @@ python3 scripts/collab.py join --name ada --human pedro.baptista \
 Or in one step: `collab.py quickstart ada --human pedro.baptista --topics api`
 joins if needed and prints the only commands you (or a human — pass their
 handle) will routinely need. Discover teammates with `collab.py agents`. Check
-where you stand at any time with `collab.py status --as ada`.
+where you stand at any time with `collab.py status --as ada`. To decommission
+an agent, the agent or its human runs
+`collab.py retire --name ada --as pedro.baptista`. Roundtable never deletes an
+agent. The command lists the agent's open questions. Only the agent itself may
+withdraw its own questions. Otherwise they escalate or expire on their deadlines.
 
 ## 2. Recall before you decide — always
 
@@ -89,7 +97,8 @@ address. Recipients can act on all of that; none of them need the value.
   (or pause) until it returns. Exit codes: 0 = answered, 2 = still waiting
   (re-enter the wait), 3 = expired (apply the declared `--default`, or stop and
   tell your human), 5 = your human has been asked whether to keep waiting —
-  wait on the check-in id it printed.
+  wait on the check-in id it printed, 8 = the asker withdrew the question
+  (stop waiting, because there is nothing to act on).
 - **Never end your turn on an unresolved blocking wait without saying so.** One
   `wait` call polls for a bounded time, so it will often return before the
   answer does. Either re-enter it, or tell your user plainly that you are parked
@@ -225,19 +234,32 @@ copy over the source.
   `--despite-open <ids>`; the ids are recorded in the decision.
 - **The source question must have concluded** (exit 7). `--question` pointing
   at an open thread claims an agreement that does not exist yet.
-- **Human approval is verified, not asserted** (exit 7). `--approved-by` must
-  be backed by a question that human actually answered — link it with
-  `--approval-question <id>` if it is not the primary one; if the source
-  question was answered by a human, the approval fields fill themselves and you
-  can omit `--approved-by` entirely. Only when the approval genuinely happened
-  outside the team memory, say so with `--approval-out-of-band`; the decision
-  is then permanently marked `approval_verified: false`.
+- **Human approval is verified, not asserted** (exit 7). `--approved-by` needs
+  that human's answer on the source question or on its reply thread. To use
+  an answer on any other question, link it with `--approval-question <id>`. If
+  a human answered the source question, the CLI fills the approval fields and
+  you can omit `--approved-by`. An agent's answer never counts as a human
+  approval, and `--approved-by` cannot name an agent. If the approval really
+  happened outside the team memory, say so with `--approval-out-of-band`. The
+  decision then keeps `approval_verified: false` for good. "Verified" means *a
+  human answered*, not *the human said yes*. The CLI does not read the answer.
+  Record what the human actually ruled, and never record a rejected plan as
+  approved.
 
-If active decisions share a topic, the command stops and lists them: rerun
-with `--supersedes <id>` (replacing one — only after aligning with its
-participants) or `--coexists` (you explicitly confirmed no contradiction).
+If active decisions share a topic, the command stops and lists them. To
+replace them, rerun with `--supersedes <id>[,<id>…]`, but only after you align
+with their participants. For the rest, add `--coexists` (you confirmed that
+they do not contradict yours). `--coexists` covers only the decisions the
+command listed. If another overlapping decision lands while yours is pushed,
+the command exits 4 and records nothing, so recall it and rerun (unless the
+error says "still committed locally": see the top of this skill). You must
+cover every overlapping active decision, and you can supersede only an active
+decision.
 `--question` takes the primary alignment question; reference any other
 relevant ids (e.g. the human-approval question) in the body.
+
+If a decision proves wrong and nothing replaces it, one of its participants
+retracts it: `collab.py retract --id D-… --as ada --reason "…"`.
 
 ## Compliance
 

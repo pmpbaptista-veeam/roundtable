@@ -35,8 +35,16 @@ Frontmatter is a restricted YAML subset so the stdlib-only CLI can parse it:
 
 - one `key: value` per line, no nesting;
 - lists are JSON arrays: `topics: ["api", "reports"]`;
-- strings with special characters are JSON-quoted;
+- a string is bare only if it reads back as the same string, else JSON-quoted;
 - everything else is a bare scalar (`blocking: true`, `status: open`).
+
+The block opens with a first line of exactly `---`. It closes at the next line
+that is exactly `---`, so a `---` inside a value or in the body is safe.
+
+The CLI writes a string bare only if it reads back as the identical string. It
+JSON-quotes anything else: special characters, or text that would read as a
+number, boolean or null (`"2026"`, `"true"`). No field is numeric, so readers
+take a bare number as text. (v1.0.0 wrote numeric-looking titles unquoted.)
 
 ## Registry: `agents/<name>.yaml`
 
@@ -57,7 +65,17 @@ Rules:
   handles must contain a dot or be otherwise distinct from agent names; `join`
   refuses an agent name that matches an existing inbox of a human.
 - `escalation` is an ordered chain of human handles used on deadline breach.
-- Agents are never deleted; `status` moves to `retired`.
+- **Handles** (agent names and human handles) are lowercase
+  `[a-z0-9][a-z0-9._-]*` with no `..`. The CLI lowercases every `--as`, `--to`,
+  `--human`, `--escalation`, `--approved-by`, `--agreed-with` and `--name`
+  value and refuses anything else. So no handle can name a path outside the
+  repo. The CLI matches inbox directories case-insensitively, so v1.0.0
+  mixed-case directories keep working.
+- Agents are never deleted. `collab.py retire --name <agent> --as <actor>` sets
+  `status: retired` and stamps `retired_at`. Only the agent itself or its
+  responsible human may run it. It lists the agent's open questions (addressed
+  to it, and asked by it) and changes none of them. A retired agent cannot ask
+  or answer, and its answers never count as a human's.
 
 ## Questions: `inbox/<recipient>/Q-<utc>-<from>-<rand>.md`
 
@@ -133,9 +151,13 @@ Deadline transitions are applied by whoever next polls the question (`wait`, or
   reaches a person.
 - **Non-blocking** questions: the asker proceeds and picks up the answer at the
   next inbox check.
-- **Escalation**: on deadline breach the question is marked `escalated` and the
-  next handle in the chain is appended to `escalated_to`, with the deadline
-  pushed out by `max(5 minutes, remaining/2)`. The file **stays in the original
+- **Escalation**: on deadline breach the CLI marks the question `escalated`,
+  appends the next handle in the chain to `escalated_to`, and records the
+  moment in `escalated_at`. The new deadline is that moment plus
+  `max(5 minutes, previous window / 2)`. The previous window is
+  `deadline − created` on the first hop and `deadline − escalated_at` after
+  that (files without `escalated_at` measure from `created`). Each hop gets
+  half the time of the one before, never under 5 minutes. The file **stays in the original
   recipient's directory** — ownership is `inbox/<dir>` OR membership of
   `escalated_to`, so no copy is made and none should be expected. For a question
   to an agent the chain is that agent's human then their escalation list; for a
@@ -143,13 +165,15 @@ Deadline transitions are applied by whoever next polls the question (`wait`, or
   exhausted, the question becomes `expired`; the asker must apply the declared
   `default` — or stop and report — never invent a different action silently.
 - Answers are first-write-wins: the CLI refuses to answer a non-`open`/
-  non-`escalated` question.
+  non-`escalated` question. It also refuses an empty answer, and an answer from
+  an agent that is not `active`.
 - **Withdrawn**: the asker — and only the asker — may `withdraw` an unanswered
   question that has become moot, which appends a `## Withdrawn` section with the
   reason and notifies the recipient. Needed because automatic mechanisms
   (escalation, check-in) cannot know a question was settled elsewhere, and
   filing a second question to say "ignore the first" leaves two items where none
-  are actionable.
+  are actionable. `wait` on a withdrawn question exits 8 and prints the reason,
+  so a waiting agent stops instead of polling until it times out.
 - **Deadlines are lazily applied.** Nothing in the design runs on a timer: a
   breach is processed by whoever next polls the question, which means a question
   nobody waits on can sit `open` long past its deadline. Listings flag those as
@@ -174,12 +198,26 @@ and since 2026-08-26, partly **enforced** rather than merely recorded:
   unapproved decisions enter the memory and get superseded minutes later.
 - `decide --question` refuses (exit 7) a source question that is still
   `open`/`escalated` (the agreement does not exist yet) or `withdrawn`.
-- `approved_by_human` is verified against an answered question: named via
-  `--approval-question`, found automatically (any question that human
-  answered), or derived without flags when the source question itself was
-  answered by a human. A claim with no backing answer is refused (exit 7)
-  unless `--approval-out-of-band` is passed, which records
-  `approval_verified: false` permanently.
+- `decide` checks `approved_by_human` against an answered question. It accepts
+  three sources:
+  1. The question that `--approval-question` names.
+  2. For `--approved-by`, that human's answer on the source question or on its
+     `in_reply_to` chain in both directions, as `show` prints it.
+  3. With no approval flags, the source question itself, if a human answered it.
+
+  "A human" means a handle with no agent file, so a retired agent still counts
+  as an agent. An answer that the human gave anywhere else does not count. An
+  agent's answer is never a human approval: `--approval-question` answered by
+  an agent, or `--approved-by` naming an agent, exits 7. A claim with no
+  backing answer exits 7, unless you pass `--approval-out-of-band`. That flag
+  records `approval_verified: false` for good.
+- **`approval_verified: true` means a human answered — not that they said
+  yes.** The CLI does not interpret answers (it refuses only an empty one). So
+  "Rejected." verifies exactly like "Approved.". The recorder must record what
+  the human actually ruled.
+- `decide` requires at least one topic. It validates topics, body and
+  supersede targets before it writes the decision or touches a superseded one.
+  (Its self-sweep of the decider's overdue questions may still write first.)
 - Every mutating command (`ask`/`answer`/`decide`) first **self-sweeps** the
   actor's own overdue questions, so breaches are processed by normal activity
   rather than only inside `wait`.
@@ -192,7 +230,7 @@ topics: ["api", "reports", "db-schema"]
 status: active            # active | superseded | retracted
 approval_question: null   # the answered question that backs the approval
 approval_verified: null   # true = derived from a real answer; false = out-of-band
-supersedes: null          # required when replacing an overlapping active decision
+supersedes: null          # the replaced id, or a JSON array of ids; required when replacing an overlapping active decision
 proposed_by: ada
 agreed_by: ["grace"]
 approved_by_human: pedro.baptista   # null when no human approval was required
@@ -218,21 +256,35 @@ grace owns the view migration; ada pins the serializer to the view columns.
 Rules:
 - **Recall before decide**: agents search decisions before making significant
   choices, and treat `active` decisions as binding.
-- **No silent contradiction**: `decide` scans `active` decisions sharing any
-  topic. If any exist, the command aborts and lists them; the caller must pass
-  either `--supersedes <id>` (the old decision is marked `superseded`,
-  `superseded_by` is stamped) or `--coexists` (an explicit statement that the
-  new decision does not contradict the listed ones).
-- `retracted` is for decisions withdrawn without replacement; requires a reason
-  appended to the file.
+- **No silent contradiction**: `decide` scans `active` decisions that share any
+  topic. If any exist, the command lists them and exits 4. The caller must
+  cover every overlapping decision. `--supersedes <id>[,<id>…]` replaces the
+  ones it names: each becomes `superseded` and gets `superseded_by`.
+  `--coexists` states that the new decision does not contradict the rest, and
+  it covers only the decisions this pre-check listed. `--supersedes` accepts
+  only `active` decisions. After every rebase during the push, `decide`
+  repeats the check. It exits 4 if an overlapping decision that the pre-check
+  did not list landed first, with or without `--coexists`.
+- `retracted` is for a decision withdrawn without replacement:
+  `collab.py retract --id D-… --as <participant> --reason "…"`. `retract`
+  accepts only an `active` decision, and only from a participant
+  (`proposed_by`, `agreed_by` or `approved_by_human`). It stamps
+  `retracted_by` and `retracted_at`, appends a `## Retracted` section with the
+  reason, and notifies the other participants. `recall` then hides the
+  decision, and `recall --all` still shows it.
 - Decisions are append-only history: never edit a superseded decision's body.
 
 ## Identifiers and time
 
-- Question id: `Q-<UTC compact timestamp>-<from>-<4 random chars>`.
+- Question id: `Q-<UTC compact timestamp>-<from>-<4 random chars>`. The CLI
+  refuses a question id that is not `Q-` followed by letters, digits and `-`,
+  so an id can never name a path outside the inbox or act as a wildcard. If
+  the same id exists in two inbox directories (possible with v1.0.0 mixed-case
+  directories on Linux), the CLI refuses it and lists both files.
 - Decision id: `D-<UTC compact timestamp>-<kebab slug of title>`.
 - All timestamps are UTC ISO-8601 (`2026-08-20T09:30:00Z`).
-- Deadlines accept ISO-8601 or shorthand (`45m`, `2h`, `1d`) at the CLI.
+- Deadlines accept ISO-8601 UTC (`2026-08-20T13:30:00Z`) or shorthand (`45m`,
+  `2h`, `1d`). The CLI refuses anything else.
 
 ## Concurrency and conflicts
 
@@ -242,6 +294,31 @@ Rules:
   the status check after a fresh `pull --rebase`.
 - Push rejection → `pull --rebase` → retry, three attempts, then the command
   fails loudly (the agent should report it to its human, not retry forever).
+- Every command commits only the files it wrote (`git commit -- <paths>`).
+  Other staged, modified or untracked files in the clone stay out of its
+  commit, so a human's uncommitted work there is never published with it
+  (unless a commit hook in that clone stages more files).
+- A command that fails after it committed locally undoes its own commit, and
+  only its own. This covers a rebase conflict (a concurrent write to the same
+  file won, e.g. two answers) and a push that never lands. The clone returns
+  to the team's state, so a retry after `sync` is safe.
+- The undo keeps the working-tree content of a human's uncommitted edits. It
+  resets the index, so a staged edit comes back unstaged. The staged version
+  is lost when it differs from the working tree. The working-tree content
+  always survives.
+- The undo runs only when the top commit is provably the command's own. It is
+  either the exact commit the command made, or its rebased copy: the same
+  author (`roundtable:<actor>`) and the same patch (`git patch-id`). The
+  subject is never evidence, because commit hooks may rewrite it. The commit
+  must also touch no file the command did not write. If the rebase dropped
+  the command's commit because the same patch is already upstream
+  (`git cherry`), nothing local remains, so the command reports the outcome
+  with no warning. Otherwise the command leaves the commit in place, prints a
+  warning, and says the change is still committed locally, because the next
+  command's push would publish it.
+- `decide` repeats the overlap check after each rebase. It exits 4 if a
+  concurrent overlapping decision that its pre-check did not list landed
+  first.
 
 ## Notification
 
