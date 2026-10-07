@@ -67,6 +67,17 @@ Teams or Slack incoming webhook.
 
 Then follow [`demo/DEMO.md`](demo/DEMO.md).
 
+## Development
+
+The CLI uses only the standard library, and so do its tests:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+The tests build throwaway git repos in the system temp dir. They never send
+notifications.
+
 ## Compliance
 
 The skill tells agents never to write PII, customer data, or production code

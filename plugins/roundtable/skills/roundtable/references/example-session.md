@@ -48,7 +48,7 @@ BLOCKING human approval first:)*
 ```
 $ python3 scripts/collab.py ask --as grace --to dana.lead \
     --question "View backups_report_v1 requires dropping legacy column raw_size (fully migrated). Approve the drop?" \
-    --blocking --urgency high --deadline 4h
+    --blocking --urgency high --deadline 4h --default "do not drop raw_size"
 Q-20260820T101200Z-grace-p2x1
 $ python3 scripts/collab.py wait --id Q-20260820T101200Z-grace-p2x1
 ```
@@ -77,13 +77,16 @@ $ python3 scripts/collab.py answer --id Q-20260820T093000Z-ada-k3f9 \
 
 ---
 
-**ada's session** — `wait` returns the answer. ada records the agreement:
+**ada's session** — `wait` returns the answer. dana's approval lives on grace's
+own question, not on ada's thread. So ada links it explicitly and records the
+agreement:
 
 ```
 $ python3 scripts/collab.py decide --as ada \
     --title "Report export reads from backups_report_v1 view" \
     --topics api,reports,db-schema \
     --agreed-with grace --approved-by dana.lead \
+    --approval-question Q-20260820T101200Z-grace-p2x1 \
     --question Q-20260820T093000Z-ada-k3f9 \
     --body "## Context
 Export needs aggregates the raw table lacks.
