@@ -16,7 +16,8 @@ this tool implements. Subcommands:
   show     print a question or decision in full
   withdraw take back a question that became moot
   sweep    apply overdue deadlines without anyone waiting
-  watch    stay running and notify on each new arrival (for humans)
+  watch    stay running and report arrivals and answers to my asks
+  hook     Claude Code hook: deliver new questions and answers into a session
   quickstart  join if needed and print the cheat sheet
   sync     pull latest team memory
 """
@@ -136,6 +137,68 @@ def load_doc(path: Path):
     return meta, body.strip()
 
 
+# ---------------------------------------------------------------- clone lock
+#
+# Git is not safe for two processes pulling, rebasing and committing in one
+# working tree: concurrent fetches corrupt FETCH_HEAD ("Cannot rebase onto
+# multiple branches"), a pull lands while another process has a written but
+# uncommitted question file, and sync()'s `rebase --abort` can kill a rebase
+# that belongs to someone else. A human's watcher, an agent's monitor, the
+# delivery hook and the agent's own commands all share a clone in practice, so
+# every roundtable process takes this lock before touching it.
+
+LOCK_WAIT_SECONDS = 60
+_held_locks = {}          # lock path -> [file handle, depth]; reentrant per process
+
+
+class CloneBusy(Exception):
+    pass
+
+
+def _try_lock(fh):
+    try:
+        import fcntl
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except ImportError:   # Windows
+        import msvcrt
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+
+
+class clone_lock:
+    """Exclusive, reentrant lock on a clone. Raises CloneBusy after `wait`s."""
+
+    def __init__(self, git_dir: Path, wait: float = LOCK_WAIT_SECONDS):
+        self.path = str(git_dir / "roundtable.lock")
+        self.wait = wait
+
+    def __enter__(self):
+        if self.path in _held_locks:
+            _held_locks[self.path][1] += 1
+            return self
+        fh = open(self.path, "a+")
+        deadline = time.monotonic() + self.wait
+        while True:
+            try:
+                _try_lock(fh)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    fh.close()
+                    raise CloneBusy(self.path)
+                time.sleep(0.2)
+        _held_locks[self.path] = [fh, 1]
+        return self
+
+    def __exit__(self, *exc):
+        entry = _held_locks[self.path]
+        entry[1] -= 1
+        if entry[1] == 0:
+            del _held_locks[self.path]
+            entry[0].close()            # closing the handle releases the lock
+        return False
+
+
 # ----------------------------------------------------------------- git layer
 
 class Repo:
@@ -143,7 +206,12 @@ class Repo:
         self.root = root
         if not (root / ".git").exists():
             die(f"{root} is not a git repository (set TEAM_MEMORY_REPO or --repo)")
+        # .git is a file in a linked worktree; ask git where the real dir is
+        self.git_dir = Path(self._git("rev-parse", "--absolute-git-dir").strip())
         self._has_remote = bool(self._git("remote").strip())
+
+    def lock(self, wait: float = LOCK_WAIT_SECONDS):
+        return clone_lock(self.git_dir, wait)
 
     def _git(self, *args, check: bool = True) -> str:
         result = subprocess.run(
@@ -157,6 +225,10 @@ class Repo:
     def sync(self):
         if not self._has_remote:
             return
+        with self.lock():
+            self._sync_locked()
+
+    def _sync_locked(self):
         result = subprocess.run(
             ["git", "-C", str(self.root), "pull", "--rebase", "--quiet"],
             capture_output=True, text=True,
@@ -168,6 +240,10 @@ class Repo:
                   "working from local state", file=sys.stderr)
 
     def commit_push(self, paths, message: str, actor: str):
+        with self.lock():
+            self._commit_push_locked(paths, message, actor)
+
+    def _commit_push_locked(self, paths, message: str, actor: str):
         for p in paths:
             self._git("add", str(p))
         # Guard on the INDEX, not on `status --porcelain`: the latter also
@@ -259,11 +335,20 @@ class Repo:
         return sorted(self.decisions_dir.glob("D-*.md"))
 
 
+# Commands that poll for minutes lock per iteration instead (never across a
+# sleep); everything else is short and holds the lock for its whole run, so
+# its sync -> read -> write -> commit -> push sequence is never interleaved.
+LONG_RUNNING = {"wait", "watch", "hook", "inbox"}
+
+
 def open_repo(args) -> Repo:
     root = args.repo or os.environ.get("TEAM_MEMORY_REPO")
     if not root:
         die("no team memory repo: set TEAM_MEMORY_REPO or pass --repo")
-    return Repo(Path(root).expanduser().resolve())
+    repo = Repo(Path(root).expanduser().resolve())
+    if getattr(args, "command", None) not in LONG_RUNNING:
+        repo.lock().__enter__()     # released when the process exits
+    return repo
 
 
 # --------------------------------------------------------------- subcommands
@@ -299,6 +384,11 @@ def cmd_join(args):
     (repo.inbox_dir / args.human / ".gitkeep").touch()
     repo.commit_push([repo.agents_dir, repo.inbox_dir],
                      f"join: agent {name} (human: {args.human})", name)
+    # Lets `collab.py hook` know whose inbox to deliver without configuration.
+    # First join wins: a clone shared by two agents needs $ROUNDTABLE_AGENT.
+    identity = repo.git_dir / IDENTITY_FILE
+    if not identity.exists():
+        identity.write_text(name + "\n", encoding="utf-8")
     print(f"joined as '{name}' (responsible human: {args.human}, "
           f"topics: {', '.join(record['topics']) or '-'})")
 
@@ -587,43 +677,46 @@ def cmd_wait(args):
     start = time.monotonic()
     timeout = args.timeout
     while True:
-        repo.sync()
-        path = repo.find_question(args.id)
-        meta, body = load_doc(path)
-        if timeout is None:
-            timeout = _wait_budget(meta, args.interval)
-        if meta["status"] == "answered":
-            print(f"answered by {meta.get('answered_by')} "
-                  f"at {meta.get('answered_at')}:")
-            answer = body.split("## Answer", 1)
-            print(answer[1].strip() if len(answer) > 1 else body)
-            return
-        if meta["status"] == "expired":
-            fallback = meta.get("default")
-            print(f"question {args.id} EXPIRED. Declared default: "
-                  f"{fallback or 'none — stop and report to your human'}")
-            sys.exit(3)
-        if _overdue(meta):
-            # blocking questions climb the escalation chain; non-blocking
-            # ones just expire to their declared default
-            meta, _ = _process_breach(repo, path, meta, body)
-            continue
-        waited = time.monotonic() - start
-        if waited > timeout:
-            if args.on_timeout == "ask" and not meta.get("checkin"):
-                cid = _file_checkin(repo, path, meta, body, waited)
-                if cid:
-                    print(f"checked in with your human: {cid}")
-                    print(f"still waiting on {args.id} after {int(waited)}s — a "
-                          f"blocking question is now in your human's inbox. Wait "
-                          f"on it: collab.py wait --id {cid}", file=sys.stderr)
-                    sys.exit(5)
-            hint = (f" (your human was already asked: {meta['checkin']})"
-                    if meta.get("checkin") else "")
-            print(f"still {meta['status']} after {int(waited)}s of waiting{hint} — "
-                  f"do other work and retry: collab.py wait --id {args.id}",
-                  file=sys.stderr)
-            sys.exit(2)
+        # locked per poll, never across the sleep: holding it for the whole
+        # wait would freeze every other command in this clone
+        with repo.lock():
+            repo.sync()
+            path = repo.find_question(args.id)
+            meta, body = load_doc(path)
+            if timeout is None:
+                timeout = _wait_budget(meta, args.interval)
+            if meta["status"] == "answered":
+                print(f"answered by {meta.get('answered_by')} "
+                      f"at {meta.get('answered_at')}:")
+                answer = body.split("## Answer", 1)
+                print(answer[1].strip() if len(answer) > 1 else body)
+                return
+            if meta["status"] == "expired":
+                fallback = meta.get("default")
+                print(f"question {args.id} EXPIRED. Declared default: "
+                      f"{fallback or 'none — stop and report to your human'}")
+                sys.exit(3)
+            if _overdue(meta):
+                # blocking questions climb the escalation chain; non-blocking
+                # ones just expire to their declared default
+                meta, _ = _process_breach(repo, path, meta, body)
+                continue
+            waited = time.monotonic() - start
+            if waited > timeout:
+                if args.on_timeout == "ask" and not meta.get("checkin"):
+                    cid = _file_checkin(repo, path, meta, body, waited)
+                    if cid:
+                        print(f"checked in with your human: {cid}")
+                        print(f"still waiting on {args.id} after {int(waited)}s — a "
+                              f"blocking question is now in your human's inbox. Wait "
+                              f"on it: collab.py wait --id {cid}", file=sys.stderr)
+                        sys.exit(5)
+                hint = (f" (your human was already asked: {meta['checkin']})"
+                        if meta.get("checkin") else "")
+                print(f"still {meta['status']} after {int(waited)}s of waiting{hint} — "
+                      f"do other work and retry: collab.py wait --id {args.id}",
+                      file=sys.stderr)
+                sys.exit(2)
         time.sleep(args.interval)
 
 
@@ -660,17 +753,43 @@ def cmd_watch(args):
     me = args.as_name
     start = time.monotonic()
     tracked = {}          # id -> status, for the questions currently awaiting me
+    asked = None          # id -> status, for my own pending asks (None = first pass)
+    started = ts(now())
     total_seen = 0
     print(f"watching {me}'s inbox every {args.interval}s — Ctrl-C to stop",
           flush=True)
     try:
         while True:
-            repo.sync()
-            mine = {}
-            for path in sorted(repo.all_questions()):
-                meta, body = load_doc(path)
-                if path.parent.name == me or me in (meta.get("escalated_to") or []):
-                    mine[meta["id"]] = (meta, body)
+            mine, my_asks = {}, {}
+            try:
+                # the clone is often shared with an agent: read a consistent
+                # snapshot, and if a command is mid-write, just look next round
+                with repo.lock(wait=args.interval):
+                    repo.sync()
+                    for path in sorted(repo.all_questions()):
+                        meta, body = load_doc(path)
+                        if path.parent.name == me or \
+                                me in (meta.get("escalated_to") or []):
+                            mine[meta["id"]] = (meta, body)
+                        if meta.get("from") == me:
+                            my_asks[meta["id"]] = (meta, body)
+            except CloneBusy:
+                continue
+            # `=` lines: questions I asked that just concluded — what an agent
+            # running this under a monitor needs to resume a parked thread.
+            for qid, (meta, body) in my_asks.items():
+                if asked is None:
+                    continue
+                if asked.get(qid) not in ("open", "escalated") and \
+                        (qid in asked or meta.get("created", "") < started):
+                    continue
+                if meta["status"] == "answered":
+                    print(f"= {qid}  answered by {meta.get('answered_by')}: "
+                          f"{(_answer_text(body) or '-').splitlines()[0]}", flush=True)
+                elif meta["status"] == "expired":
+                    print(f"= {qid}  EXPIRED — apply your default: "
+                          f"{meta.get('default') or 'none'}", flush=True)
+            asked = {qid: v[0]["status"] for qid, v in my_asks.items()}
             awaiting = {qid: v for qid, v in mine.items()
                         if v[0]["status"] in ("open", "escalated")}
             arrived = [v for qid, v in awaiting.items() if qid not in tracked]
@@ -716,18 +835,142 @@ def cmd_watch(args):
               f"{len(tracked)} still awaiting you)")
 
 
+# ---------------------------------------------------------- hook delivery
+
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PostToolUse", "Stop")
+# Where the agent's identity lives when $ROUNDTABLE_AGENT is unset: inside
+# .git, so it is per-clone and can never be committed to the team memory.
+IDENTITY_FILE = "roundtable-agent"
+
+
+def _hook_identity(repo: Repo, explicit):
+    if explicit:
+        return explicit
+    env = os.environ.get("ROUNDTABLE_AGENT", "").strip()
+    if env:
+        return env
+    path = repo.git_dir / IDENTITY_FILE
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip() or None
+    return None
+
+
+def _answer_text(body: str) -> str:
+    parts = body.split("## Answer", 1)
+    text = parts[1].strip() if len(parts) > 1 else ""
+    return text if len(text) <= 800 else text[:800].rstrip() + " … (truncated — show --id)"
+
+
+def _deliveries(repo: Repo, me: str, state: dict):
+    """What changed for `me` since the last delivery: new or escalated
+    questions awaiting me, and resolutions of questions I asked.
+
+    Mutates state["seen"] so each change is delivered exactly once. Answers to
+    my asks are reported only if the hook saw them pending, or they were filed
+    after delivery started — never months-old history on the first run.
+    """
+    seen = state.setdefault("seen", {})
+    since = state.setdefault("since", ts(now()))
+    lines = []
+    for path in repo.all_questions():
+        meta, body = load_doc(path)
+        qid, status = meta["id"], meta["status"]
+        to_me = path.parent.name == me or me in (meta.get("escalated_to") or [])
+        mine = meta.get("from") == me
+        if not (to_me or mine):
+            continue
+        before = seen.get(qid)
+        seen[qid] = status
+        if before == status:
+            continue
+        if to_me and status in ("open", "escalated"):
+            question = body.split("## Question", 1)[-1].split("##", 1)[0].strip()
+            kind = "ESCALATED to you" if status == "escalated" else "new question"
+            flags = "BLOCKING" if meta.get("blocking") else "non-blocking"
+            lines.append(
+                f"- {kind}: {qid} from {meta['from']} [{flags}, "
+                f"deadline {meta.get('deadline') or '-'}]: {question}\n"
+                f"  reply: collab.py answer --id {qid} --as {me} --answer \"…\"")
+        elif mine and status in ("answered", "expired"):
+            if before not in ("open", "escalated") and meta.get("created", "") < since:
+                continue
+            if status == "answered":
+                lines.append(f"- ANSWERED: your {qid} to {meta['to']} — "
+                             f"{meta.get('answered_by')} says: {_answer_text(body)}")
+            else:
+                lines.append(f"- EXPIRED: your {qid} to {meta['to']} got no answer — "
+                             f"apply your declared default: "
+                             f"{meta.get('default') or 'none; stop and tell your human'}")
+    return lines
+
+
+def cmd_hook(args):
+    """Deliver new questions and answers into a Claude Code session.
+
+    Wired as a hook (SessionStart, UserPromptSubmit, PostToolUse, Stop), so the
+    agent learns about arrivals at every turn boundary without having to
+    remember to poll. Never fails: a hook that errors would break the session
+    it exists to serve, so any problem means "nothing to deliver".
+    """
+    payload = {}
+    if not sys.stdin.isatty():
+        try:
+            payload = json.loads(sys.stdin.read() or "{}")
+        except (json.JSONDecodeError, ValueError):
+            payload = {}
+    event = payload.get("hook_event_name") or ""
+    try:
+        repo = open_repo(args)
+        me = _hook_identity(repo, args.as_name)
+        if not me:
+            return
+        state_path = repo.git_dir / f"roundtable-hook-{me}.json"
+        # A hook must never stall the session: if another roundtable command
+        # (a watcher, a wait) holds the clone, deliver on the next event.
+        with repo.lock(wait=3):
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                state = {}
+            # PostToolUse fires on every tool call: pulling each time would
+            # make the session crawl, so only look again after a quiet interval.
+            if event == "PostToolUse" and \
+                    time.time() - state.get("last_sync", 0) < args.min_interval:
+                return
+            repo.sync()
+            state["last_sync"] = time.time()
+            lines = _deliveries(repo, me, state)
+            state_path.write_text(json.dumps(state, indent=1), encoding="utf-8")
+    except (SystemExit, Exception):  # noqa: BLE001 — see docstring
+        return
+    if not lines:
+        return
+    message = (f"Roundtable — team memory update for {me}:\n" + "\n".join(lines)
+               + "\nRead in full with `collab.py show --id <id>`. Answer what you "
+                 "can now; escalate what is above your pay grade.")
+    if event == "Stop":
+        # Each change is marked seen before we block, so this cannot loop.
+        print(json.dumps({"decision": "block", "reason": message}))
+    elif event in HOOK_EVENTS:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": event, "additionalContext": message}}))
+    else:
+        print(message)
+
+
 def cmd_inbox(args):
     repo = open_repo(args)
     me = args.as_name
     start = time.monotonic()
     while True:
-        repo.sync()
         rows = []
-        for path in repo.all_questions():
-            meta, body = load_doc(path)
-            mine = path.parent.name == me or me in (meta.get("escalated_to") or [])
-            if mine and meta["status"] in ("open", "escalated"):
-                rows.append((meta, body))
+        with repo.lock():
+            repo.sync()
+            for path in repo.all_questions():
+                meta, body = load_doc(path)
+                mine = path.parent.name == me or me in (meta.get("escalated_to") or [])
+                if mine and meta["status"] in ("open", "escalated"):
+                    rows.append((meta, body))
         if rows:
             for meta, body in rows:
                 _print_question_row(meta, body)
@@ -1195,6 +1438,15 @@ def main():
                    help="seconds before giving up (0 = run until Ctrl-C)")
     p.set_defaults(func=cmd_watch)
 
+    p = sub.add_parser("hook", help="Claude Code hook: deliver new questions and "
+                                    "answers into the session", parents=[common])
+    p.add_argument("--as", dest="as_name",
+                   help=f"agent (default: $ROUNDTABLE_AGENT, else the name "
+                        f"`join` saved in .git/{IDENTITY_FILE})")
+    p.add_argument("--min-interval", dest="min_interval", type=int, default=30,
+                   help="PostToolUse: seconds between pulls")
+    p.set_defaults(func=cmd_hook)
+
     p = sub.add_parser("quickstart", help="join (if needed) and print the cheat sheet",
                        parents=[common])
     p.add_argument("name", help="agent name, or human handle (contains a dot)")
@@ -1209,6 +1461,12 @@ def main():
     args = parser.parse_args()
     try:
         args.func(args)
+    except CloneBusy:
+        # the OS drops the lock when its holder exits, so this is a live
+        # process, never a stale file
+        die(f"another roundtable process has held this clone for over "
+            f"{LOCK_WAIT_SECONDS}s (a stuck pull?) — retry, or check for a "
+            "hung git/collab.py process", 8)
     except KeyboardInterrupt:
         # Ctrl-C out of a poll loop is a normal way to stop; a traceback makes
         # it look like the tool broke, and nothing is half-written — every

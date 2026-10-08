@@ -242,6 +242,15 @@ Rules:
   the status check after a fresh `pull --rebase`.
 - Push rejection → `pull --rebase` → retry, three attempts, then the command
   fails loudly (the agent should report it to its human, not retry forever).
+- **Processes sharing one clone take turns.** Git is not safe for two
+  processes pulling and committing in one working tree (concurrent fetches
+  corrupt `FETCH_HEAD`, and a pull can land on another process's uncommitted
+  question file). Every `collab.py` process takes an OS lock on
+  `.git/roundtable.lock`: short commands hold it for their whole
+  sync → write → commit → push; `wait`, `watch` and `inbox --wait` hold it per
+  poll, never across a sleep; the hook gives up after 3 s and delivers on the
+  next event. The OS drops the lock when its holder exits, so it cannot go
+  stale. A command that cannot get it within 60 s exits 8.
 
 ## Notification
 
@@ -252,8 +261,14 @@ never block a coordination action.
 - **Desktop** notifications fire on the machine that ran the command. A popup
   addressed to a human by an *agent's* command therefore appears on the agent's
   machine. Treat single-machine demos accordingly.
+- **Hook**: `collab.py hook` is the agent-side delivery. Run by Claude Code at
+  session start, on each prompt, after tool calls (pulling at most every 30 s)
+  and on stop, it injects new questions to the agent and answers to its asks,
+  each change once (state in `.git/roundtable-hook-<agent>.json`). On stop it
+  blocks the turn's end so the agent acts first. It never fails the session.
 - **Watcher**: `watch --as <handle>` runs persistently on the recipient's own
-  machine, reporting transitions (`+` arrived, `^` escalated, `-` resolved) and
+  machine, reporting transitions (`+` arrived, `^` escalated, `-` resolved,
+  `=` one of my own questions answered or expired) and
   notifying there — the right screen by construction, and the recommended way
   for a human to be interrupted. (`inbox --wait` is the one-shot variant an
   agent uses to proceed as soon as anything arrives.)
