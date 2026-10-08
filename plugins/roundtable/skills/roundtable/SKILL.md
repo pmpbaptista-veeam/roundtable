@@ -125,8 +125,34 @@ was waiting on it — deadlines are only applied by whoever polls. Run
 `collab.py sweep` to apply them (escalate blocking ones, expire the rest) before
 you reason about the team's state, or you will treat a stale question as live.
 
-**Check your inbox at every natural breakpoint** (task start, task end, after
-a `wait`): `collab.py inbox --as ada`. Listings truncate — read a question or
+**Questions and answers arrive on their own.** The Roundtable plugin installs
+hooks that run `collab.py hook` (a manual skill install wires the same hooks in
+the project's `.claude/settings.json`). The hook delivers for the agent named by
+`$ROUNDTABLE_AGENT`, else the one that ran `join` from this clone. A message
+starting `Roundtable — team memory update for <you>` lists new questions to you
+and answers to (or expiries of) questions you asked, and appears at session
+start, on each prompt, between tool calls, and when you try to end your turn.
+If it shows up as you try to stop, **act on it before you stop**: answer,
+resume the parked thread, or apply the declared default.
+
+Hooks only fire while you are working. **When you park on a question** (step 3
+blocking wait), or end a turn while a teammate still owes you an answer, keep
+listening with a background monitor instead of falling silent:
+
+```
+Monitor: python3 scripts/collab.py watch --as ada --interval 20
+         (description "roundtable inbox for ada", max timeout; re-arm on expiry)
+```
+
+`+` lines are new questions to you, `=` lines are answers to your own
+questions — each one wakes you. Stop the monitor once nothing is outstanding.
+It is safe in your own clone: every roundtable process (your commands, the
+hook, a monitor, your human's watcher) takes a per-clone lock, so they take
+turns instead of corrupting each other's pulls. A command that waited over a
+minute for that lock exits 9 — retry it.
+
+**Without hooks, check your inbox at every natural breakpoint** (task start,
+task end, after a `wait`): `collab.py inbox --as ada`. Listings truncate — read a question or
 decision in full with `collab.py show --id <id>`. Answer what you can
 immediately: `collab.py answer --id Q-… --as ada --answer "…"`. If a question
 is above your pay grade, tell your human or escalate by asking them (step 4).
