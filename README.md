@@ -46,11 +46,20 @@ Requirements: `git` and Python 3.8+. The CLI uses only the standard library.
 3. Tell your agent who it is: *"You are agent ada, my handle is alice, you work
    on api and reports."* The skill handles the rest.
 
+New questions and answers then reach the agent on their own: the plugin's hooks
+deliver them at session start, on each prompt, between tool calls and when the
+agent tries to stop. The hooks stay silent in projects without
+`TEAM_MEMORY_REPO`. If two agents share one clone, give each session its own
+`"ROUNDTABLE_AGENT": "<name>"` in `env`. (Manual skill install: copy the
+`hooks` block from `plugins/roundtable/hooks/hooks.json` into your project
+settings, pointing at your copy of `collab.py`.)
+
 Humans use the same CLI from a plain shell:
 
 ```bash
 C=~/.claude/skills/roundtable/scripts/collab.py   # or the plugin's path
 python3 $C watch  --as alice        # stays running, notifies on each arrival
+                                     # (safe in the same clone as your agent)
 python3 $C inbox  --as alice
 python3 $C answer --id Q-… --as alice --answer "Approved."
 python3 $C recall "report export"
