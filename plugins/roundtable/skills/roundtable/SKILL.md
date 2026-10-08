@@ -133,19 +133,25 @@ starting `Roundtable — team memory update for <you>` lists new questions to yo
 and answers to (or expiries of) questions you asked, and appears at session
 start, on each prompt, between tool calls, and when you try to end your turn.
 If it shows up as you try to stop, **act on it before you stop**: answer,
-resume the parked thread, or apply the declared default.
+resume the parked thread, or apply the declared default. It also lists new
+questions waiting on **your responsible human** (`FOR YOUR HUMAN …`) — bring
+those to them, as described in "Relay your human's inbox" below.
 
 Hooks only fire while you are working. **When you park on a question** (step 3
 blocking wait), or end a turn while a teammate still owes you an answer, keep
 listening with a background monitor instead of falling silent:
 
 ```
-Monitor: python3 scripts/collab.py watch --as ada --interval 20
+Monitor: python3 scripts/collab.py watch --as ada --with-human --interval 20
          (description "roundtable inbox for ada", max timeout; re-arm on expiry)
 ```
 
 `+` lines are new questions to you, `=` lines are answers to your own
-questions — each one wakes you. Stop the monitor once nothing is outstanding.
+questions, `@` lines are new questions waiting on your human — each one wakes
+you. Stop the monitor once nothing is outstanding, or when your human asks.
+Start one on request too ("keep an eye on my Roundtable inbox"). Set
+`ROUNDTABLE_NOTIFY_DESKTOP=0` in its command if your human finds the desktop
+popups redundant with your messages.
 It is safe in your own clone: every roundtable process (your commands, the
 hook, a monitor, your human's watcher) takes a per-clone lock, so they take
 turns instead of corrupting each other's pulls. A command that waited over a
@@ -177,7 +183,39 @@ recommendation — but you must never `answer`, `withdraw`, or `decide` as a
 handle that is not you. If your human's decision is needed, the words have to
 come from them; "I know what they would say" is not an approval, and every
 commit is authored with the identity you claimed, so answering as someone else
-is a lie in the permanent record.
+is a lie in the permanent record. The one exception is relaying your own
+human's answer, below — declared, in their words, and recorded as relayed.
+
+### Relay your human's inbox
+
+When the hook (`FOR YOUR HUMAN …`) or your monitor (`@` lines) shows a question
+waiting on your responsible human, the person at this session is that human:
+
+1. **Tell them what arrived** in plain words: who asked, the question, the
+   options if any, whether it is blocking, and the deadline. Read it in full
+   first with `collab.py show --id Q-…` if the line was truncated. Add your
+   recommendation only if you have one, and label it as yours.
+2. **Ask for their answer.** Then offer both ways to send it:
+   - *I submit it for you* — you run
+     `collab.py answer --id Q-… --as <human> --relayed-by <you> --answer "<their words>"`.
+     The question records `relayed_by: <you>`; a decision built on it records
+     `approval_relayed_by`.
+   - *You submit it yourself* — give them the command without `--relayed-by`,
+     to run in their own terminal (not through you):
+     `python3 <path-to>/collab.py answer --id Q-… --as <human> --answer "…"`.
+3. **Submit only on an explicit yes**, and only their words: quote what they
+   wrote, or the option they picked ("Option B, plus: keep the old view for a
+   week"). Never fill gaps, soften, or infer an answer from earlier
+   conversation — if their reply is ambiguous, ask again. Show them the exact
+   command before you run it, and the result after.
+4. Relay **answers only**. Never `withdraw`, `decide`, or `retire` for your
+   human, and never relay for anyone who is not your own responsible human.
+
+The CLI enforces the edges: inside a Claude Code session, answering as a human
+without `--relayed-by` is refused; `--relayed-by` must name this session's
+agent, and that agent's human must be the `--as` handle. If your human does not
+want their inbox brought into your session, `ROUNDTABLE_RELAY_HUMAN=0` in the
+project's `env` turns it off.
 
 ## 4. Ask your human — and when you must
 

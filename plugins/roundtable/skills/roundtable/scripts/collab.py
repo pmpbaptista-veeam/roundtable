@@ -1002,25 +1002,32 @@ def cmd_watch(args):
     start = time.monotonic()
     tracked = {}          # id -> status, for the questions currently awaiting me
     asked = None          # id -> status, for my own asks (None = first pass)
+    human = None          # with --with-human: my responsible human's handle
+    h_tracked = set()     # ids awaiting my human that were already reported
     started = ts(now())
     total_seen = 0
     print(f"watching {me}'s inbox every {args.interval}s — Ctrl-C to stop",
           flush=True)
     try:
         while True:
-            mine, my_asks = {}, {}
+            mine, my_asks, theirs = {}, {}, {}
             try:
                 # the clone is often shared with an agent: read a consistent
                 # snapshot, and if a command is mid-write, just look next round
                 with repo.lock(wait=args.interval):
                     repo.sync()
+                    if args.with_human and human is None:
+                        human = _lower((repo.load_agent(me) or {}).get("human")) or ""
                     for path in sorted(repo.all_questions()):
                         meta, body = load_doc(path)
-                        if path.parent.name.lower() == me or \
-                                me in _lowers(meta.get("escalated_to")):
+                        box = path.parent.name.lower()
+                        escalated_to = _lowers(meta.get("escalated_to"))
+                        if box == me or me in escalated_to:
                             mine[meta["id"]] = (meta, body)
                         if _lower(meta.get("from")) == me:
                             my_asks[meta["id"]] = (meta, body)
+                        elif human and (box == human or human in escalated_to):
+                            theirs[meta["id"]] = (meta, body)
             except CloneBusy:
                 continue
             # `=` lines: questions I asked that just concluded — what an agent
@@ -1038,6 +1045,26 @@ def cmd_watch(args):
                     print(f"= {qid}  EXPIRED — apply your default: "
                           f"{meta.get('default') or 'none'}", flush=True)
             asked = {qid: v[0]["status"] for qid, v in my_asks.items()}
+            # `@` lines: questions waiting on my human — an agent's monitor
+            # brings them to the person instead of leaving them in a file
+            h_awaiting = {qid: v for qid, v in theirs.items()
+                          if v[0]["status"] in ("open", "escalated")}
+            h_new = [v for qid, v in h_awaiting.items() if qid not in h_tracked]
+            for meta, body in h_new:
+                question = body.split("## Question", 1)[-1].split("##", 1)[0].strip()
+                flags = "BLOCKING" if meta.get("blocking") else "non-blocking"
+                print(f"@ {meta['id']}  for {human} from {meta['from']}  "
+                      f"deadline={meta.get('deadline') or '-'}  [{flags}]: "
+                      f"{question.splitlines()[0] if question else ''}", flush=True)
+            for qid in sorted(h_tracked - set(h_awaiting)):
+                meta = theirs.get(qid, ({},))[0]
+                by = meta.get("answered_by")
+                print(f"@- {qid}  {meta.get('status', 'gone')}"
+                      + (f" by {by}" if by else "")
+                      + f" — no longer waiting on {human}", flush=True)
+            if h_new:
+                _notify_arrivals(human, h_new)
+            h_tracked = set(h_awaiting)
             awaiting = {qid: v for qid, v in mine.items()
                         if v[0]["status"] in ("open", "escalated")}
             arrived = [v for qid, v in awaiting.items() if qid not in tracked]
@@ -1110,9 +1137,11 @@ def _answer_text(body: str) -> str:
     return text if len(text) <= 800 else text[:800].rstrip() + " … (truncated — show --id)"
 
 
-def _deliveries(repo: Repo, me: str, state: dict):
+def _deliveries(repo: Repo, me: str, state: dict, human=None):
     """What changed for `me` since the last delivery: new or escalated
-    questions awaiting me, and resolutions of questions I asked.
+    questions awaiting me, resolutions of questions I asked, and — when
+    `human` is given — new questions awaiting my responsible human, so I can
+    bring them to the person at this session.
 
     Mutates state["seen"] so each change is delivered exactly once. Answers to
     my asks are reported only if the hook saw them pending, or they were filed
@@ -1126,7 +1155,9 @@ def _deliveries(repo: Repo, me: str, state: dict):
         qid, status = meta["id"], meta["status"]
         to_me = path.parent.name.lower() == me or me in _lowers(meta.get("escalated_to"))
         mine = _lower(meta.get("from")) == me
-        if not (to_me or mine):
+        to_human = bool(human) and not mine and (
+            path.parent.name.lower() == human or human in _lowers(meta.get("escalated_to")))
+        if not (to_me or mine or to_human):
             continue
         before = seen.get(qid)
         seen[qid] = status
@@ -1140,6 +1171,21 @@ def _deliveries(repo: Repo, me: str, state: dict):
                 f"- {kind}: {qid} from {meta['from']} [{flags}, "
                 f"deadline {meta.get('deadline') or '-'}]: {question}\n"
                 f"  reply: collab.py answer --id {qid} --as {me} --answer \"…\"")
+        elif to_human and status in ("open", "escalated"):
+            question = body.split("## Question", 1)[-1].split("##", 1)[0].strip()
+            options = body.split("## Options", 1)
+            options = options[1].split("##", 1)[0].strip() if len(options) > 1 else ""
+            flags = "BLOCKING" if meta.get("blocking") else "non-blocking"
+            if status == "escalated":
+                flags += ", ESCALATED"
+            lines.append(
+                f"- FOR YOUR HUMAN {human}: {qid} from {meta['from']} [{flags}, "
+                f"deadline {meta.get('deadline') or '-'}]: {question}"
+                + (f"\n  options: {' / '.join(options.splitlines())}" if options else "")
+                + f"\n  Tell {human} it arrived and ask for their answer. Then offer: "
+                f"(a) you submit their words: collab.py answer --id {qid} --as {human} "
+                f"--relayed-by {me} --answer \"<their words>\"  or (b) they run: "
+                f"collab.py answer --id {qid} --as {human} --answer \"…\"")
         elif mine and status in ("answered", "expired"):
             if before not in ("open", "escalated") and meta.get("created", "") < since:
                 continue
@@ -1190,7 +1236,12 @@ def cmd_hook(args):
                 return
             repo.sync()
             state["last_sync"] = clock
-            lines = _deliveries(repo, me, state)
+            # ROUNDTABLE_RELAY_HUMAN=0 keeps the human's inbox out of the session
+            agent = repo.load_agent(me) or {}
+            human = _lower(agent.get("human")) or None
+            if os.environ.get("ROUNDTABLE_RELAY_HUMAN", "1").strip() == "0":
+                human = None
+            lines = _deliveries(repo, me, state, human)
             state_path.write_text(json.dumps(state, indent=1), encoding="utf-8")
     except (SystemExit, Exception):  # noqa: BLE001 — see docstring
         return
@@ -1257,14 +1308,52 @@ def cmd_answer(args):
     if answerer and answerer.get("status") != "active":
         die(f"agent '{args.as_name}' is '{answerer.get('status')}' — only an "
             "active agent may answer")
+    relay = _check_relay(repo, args.as_name, args.relayed_by)
     meta["status"] = "answered"
     meta["answered_by"] = args.as_name
     meta["answered_at"] = ts(now())
+    if relay:
+        meta["relayed_by"] = relay
     body += f"\n\n## Answer\n\n{args.answer}\n"
     path.write_text(dump_doc(meta, body), encoding="utf-8")
-    repo.commit_push([path], f"answer: {args.id} by {args.as_name}", args.as_name)
-    print(f"answered {args.id}")
-    _notify(meta["from"], f"[roundtable] {args.id} was answered by {args.as_name}")
+    via = f" (relayed by {relay})" if relay else ""
+    repo.commit_push([path], f"answer: {args.id} by {args.as_name}{via}", args.as_name)
+    print(f"answered {args.id}{via}")
+    _notify(meta["from"], f"[roundtable] {args.id} was answered by {args.as_name}{via}")
+
+
+def _in_agent_session() -> bool:
+    """Running inside a Claude Code session (or one configured for an agent)."""
+    return bool(os.environ.get("ROUNDTABLE_AGENT", "").strip()
+                or os.environ.get("CLAUDECODE"))
+
+
+def _check_relay(repo: Repo, answerer: str, relayed_by):
+    """An agent may submit its own human's answer, in their words, only if the
+    relay is declared — it is then recorded on the question for good. Without
+    the declaration, an agent session answering as a human is refused: that
+    is how an agent's guess would pass for a human ruling."""
+    if not relayed_by:
+        if _in_agent_session() and _is_human(repo, answerer):
+            die(f"this is a Claude Code session: answering as human '{answerer}' "
+                "here must be declared with --relayed-by <your agent name>, using "
+                "their own words, and is recorded as relayed. A human answering "
+                "for themselves: run the command in your own terminal.")
+        return None
+    if not _is_human(repo, answerer):
+        die(f"--relayed-by is for submitting a human's answer; '{answerer}' is an "
+            "agent — agents answer as themselves")
+    agent = repo.load_agent(relayed_by)
+    if not agent or agent.get("status") != "active":
+        die(f"--relayed-by {relayed_by} is not an active agent")
+    if _lower(agent.get("human")) != answerer:
+        die(f"{relayed_by} may relay only for its own human "
+            f"({agent.get('human')}), not for {answerer}")
+    session = os.environ.get("ROUNDTABLE_AGENT", "").strip()
+    if session and norm_handle(session, "$ROUNDTABLE_AGENT") != relayed_by:
+        die(f"this session is agent '{session.lower()}' — --relayed-by must name "
+            "it, not another agent")
+    return relayed_by
 
 
 def _is_human(repo: Repo, handle) -> bool:
@@ -1386,6 +1475,11 @@ def cmd_decide(args):
         if by and _is_human(repo, by):
             approved_by, approval_q, approval_verified = _lower(by), args.question, True
 
+    # a relayed answer still counts as the human's, but the decision says so
+    approval_relay = None
+    if approval_q and approval_verified:
+        approval_relay = load_doc(repo.find_question(approval_q))[0].get("relayed_by")
+
     decisions = {}
     for path in repo.all_decisions():
         meta, body = load_doc(path)
@@ -1432,6 +1526,8 @@ def cmd_decide(args):
     }
     if despite:
         meta["despite_open"] = sorted(despite)
+    if approval_relay:
+        meta["approval_relayed_by"] = approval_relay
     repo.decisions_dir.mkdir(parents=True, exist_ok=True)
     path = repo.decisions_dir / f"{did}.md"
     path.write_text(dump_doc(meta, body), encoding="utf-8")
@@ -1625,7 +1721,8 @@ def cmd_sync(args):
 # --------------------------------------------------------------------- main
 
 HANDLE_FLAGS = {"as_name": "--as", "to": "--to", "human": "--human",
-                "approved_by": "--approved-by", "name": "--name"}
+                "approved_by": "--approved-by", "name": "--name",
+                "relayed_by": "--relayed-by"}
 HANDLE_LIST_FLAGS = {"escalation": "--escalation", "agreed_with": "--agreed-with"}
 
 
@@ -1703,6 +1800,9 @@ def main():
     p.add_argument("--id", required=True)
     p.add_argument("--as", dest="as_name", required=True)
     p.add_argument("--answer", required=True)
+    p.add_argument("--relayed-by", dest="relayed_by",
+                   help="agent submitting its own human's answer in their words "
+                        "(--as is the human); recorded on the question")
     p.set_defaults(func=cmd_answer)
 
     p = sub.add_parser("decide", help="record a decision", parents=[common])
@@ -1788,6 +1888,9 @@ def main():
     p.add_argument("--interval", type=int, default=10, help="poll seconds")
     p.add_argument("--timeout", type=int, default=0,
                    help="seconds before giving up (0 = run until Ctrl-C)")
+    p.add_argument("--with-human", dest="with_human", action="store_true",
+                   help="agents: also report questions waiting on your "
+                        "responsible human (`@` lines)")
     p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("quickstart", help="join (if needed) and print the cheat sheet",

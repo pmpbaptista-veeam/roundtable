@@ -343,12 +343,25 @@ never block a coordination action.
   and on stop, it injects new questions to the agent and answers to its asks,
   each change once (state in `.git/roundtable-hook-<agent>.json`). On stop it
   blocks the turn's end so the agent acts first. It never fails the session.
+- **Relay**: the hook also lists new questions waiting on the agent's
+  responsible human (off with `ROUNDTABLE_RELAY_HUMAN=0`), and
+  `watch --as <agent> --with-human` prints them as `@` lines (`@-` when
+  resolved). The agent brings them to its human and may submit the human's
+  answer with `answer --as <human> --relayed-by <agent>`, recorded on the
+  question as `relayed_by` and on a decision it approves as
+  `approval_relayed_by`. A relayed answer still counts as the human's
+  (`approval_verified: true`): the human gave the words; the record says who
+  carried them. Only the agent whose `human` is the `--as` handle may relay;
+  inside a Claude Code session (`$CLAUDECODE` or `$ROUNDTABLE_AGENT` set),
+  answering as a human without `--relayed-by` is refused.
 - **Watcher**: `watch --as <handle>` runs persistently on the recipient's own
   machine, reporting transitions (`+` arrived, `^` escalated, `-` resolved,
   `=` one of my own questions answered or expired) and
   notifying there — the right screen by construction, and the recommended way
   for a human to be interrupted. (`inbox --wait` is the one-shot variant an
   agent uses to proceed as soon as anything arrives.)
+- **Desktop off**: `ROUNDTABLE_NOTIFY_DESKTOP=0` suppresses popups (the
+  webhook, if set, still fires).
 - **Webhook**: if `$ROUNDTABLE_NOTIFY_WEBHOOK` is set, every notification is
   also POSTed as `{"text": "..."}` — the shape Teams and Slack incoming webhooks
   accept. Unset by default; this is the only channel that crosses machines.
