@@ -31,7 +31,9 @@ import urllib.request
 
 def notify(to: str, message: str):
     title = f"Roundtable → {to}"
-    system = platform.system()
+    # ROUNDTABLE_NOTIFY_DESKTOP=0: no popups (tests; a monitor already shows it)
+    system = "" if os.environ.get("ROUNDTABLE_NOTIFY_DESKTOP", "1").strip() == "0" \
+        else platform.system()
     try:
         if system == "Darwin":
             subprocess.run(

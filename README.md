@@ -50,7 +50,13 @@ New questions and answers then reach the agent on their own: the plugin's hooks
 deliver them at session start, on each prompt, between tool calls and when the
 agent tries to stop. The hooks stay silent in projects without
 `TEAM_MEMORY_REPO`. If two agents share one clone, give each session its own
-`"ROUNDTABLE_AGENT": "<name>"` in `env`. (Manual skill install: copy the
+`"ROUNDTABLE_AGENT": "<name>"` in `env`.
+
+The agent also brings **your** inbox to you: when a question is waiting on its
+responsible human, it tells you what arrived, asks for your answer, and offers
+to submit it for you (recorded as `relayed_by` the agent) or gives you the
+command to run yourself. Ask it to "keep an eye on my Roundtable inbox" to keep
+that going while it is idle. Turn it off with `"ROUNDTABLE_RELAY_HUMAN": "0"`. (Manual skill install: copy the
 `hooks` block from `plugins/roundtable/hooks/hooks.json` into your project
 settings, pointing at your copy of `collab.py`.)
 

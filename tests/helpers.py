@@ -64,7 +64,10 @@ class RoundtableTestCase(unittest.TestCase):
         # keep the developer's git config, hooks, signing and templates out
         for key in list(os.environ):
             if key.startswith("GIT_") or key in ("ROUNDTABLE_NOTIFY_WEBHOOK",
-                                                 "TEAM_MEMORY_REPO"):
+                                                 "TEAM_MEMORY_REPO",
+                                                 # set when run inside Claude Code
+                                                 "CLAUDECODE", "ROUNDTABLE_AGENT",
+                                                 "ROUNDTABLE_RELAY_HUMAN"):
                 os.environ.pop(key)
         os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
         os.environ["GIT_TERMINAL_PROMPT"] = "0"

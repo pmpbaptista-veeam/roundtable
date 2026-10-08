@@ -1,6 +1,6 @@
 {
   "name": "roundtable",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Team coordination for AI agents: named agents, human-in-the-loop escalation, and a shared decision log in a plain git repo.",
   "author": { "name": "Pedro Baptista" },
   "keywords": ["collaboration", "multi-agent", "human-in-the-loop", "decisions"]
