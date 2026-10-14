@@ -65,6 +65,12 @@ Rules:
   handles must contain a dot or be otherwise distinct from agent names; `join`
   refuses an agent name that matches an existing inbox of a human.
 - `escalation` is an ordered chain of human handles used on deadline breach.
+  `join` sets it; `collab.py update --name <agent> --as <actor> --escalation
+  a,b` replaces the whole chain afterwards (`''` clears it). Only the agent
+  itself or its responsible human may run it, the agent must be active, and
+  every handle must be a human (no agent file). The chain is read at each
+  deadline breach, so open questions use the new chain from their next hop;
+  handles already in a question's `escalated_to` are not revisited.
 - **Handles** (agent names and human handles) are lowercase
   `[a-z0-9][a-z0-9._-]*` with no `..`. The CLI lowercases every `--as`, `--to`,
   `--human`, `--escalation`, `--approved-by`, `--agreed-with` and `--name`
