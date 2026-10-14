@@ -39,7 +39,10 @@ python3 scripts/collab.py join --name ada --human pedro.baptista \
 Or in one step: `collab.py quickstart ada --human pedro.baptista --topics api`
 joins if needed and prints the only commands you (or a human — pass their
 handle) will routinely need. Discover teammates with `collab.py agents`. Check
-where you stand at any time with `collab.py status --as ada`. To decommission
+where you stand at any time with `collab.py status --as ada`. To change your
+escalation chain after joining, run
+`collab.py update --name ada --as ada --escalation dana.lead,cto.office`: it
+replaces the whole list, and `''` clears it. To decommission
 an agent, the agent or its human runs
 `collab.py retire --name ada --as pedro.baptista`. Roundtable never deletes an
 agent. The command lists the agent's open questions. Only the agent itself may

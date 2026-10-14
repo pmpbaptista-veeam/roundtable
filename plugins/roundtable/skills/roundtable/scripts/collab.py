@@ -7,7 +7,8 @@ this tool implements. Subcommands:
   join     register this agent in the team memory
   agents   list the agent roster
   retire   move an agent to retired (agents are never deleted)
-  ask      file a question to another agent or a human
+  update   change an agent's escalation chain after it joined
+  ask     file a question to another agent or a human
   wait     block on a question until answered (handles escalation)
   inbox    list open questions addressed to me (or escalated to me)
   answer   answer a question
@@ -1609,6 +1610,38 @@ def cmd_recall(args):
         print()
 
 
+def cmd_update(args):
+    """Replace an agent's escalation chain: join is the only other place it is set."""
+    repo = open_repo(args)
+    repo.sync()
+    name = args.name
+    agent = repo.load_agent(name)
+    if not agent:
+        die(f"'{name}' is not a registered agent")
+    if agent.get("status") != "active":
+        die(f"agent '{name}' is '{agent.get('status')}' — only an active agent can be updated")
+    human = _lower(agent.get("human"))
+    if args.as_name not in (name, human):
+        die(f"only {name} itself or its responsible human ({human}) may update it")
+    chain = []
+    for handle in (h for h in args.escalation.split(",") if h):
+        if repo.load_agent(handle) is not None:
+            die(f"--escalation lists humans; '{handle}' is an agent")
+        if handle not in chain:
+            chain.append(handle)
+    old = list(agent.get("escalation") or [])
+    if [_lower(h) for h in old] == chain:
+        print(f"'{name}' escalation unchanged: {chain}")
+        return
+    agent["escalation"] = chain
+    repo.save_agent(name, agent)
+    repo.commit_push([repo.agent_file(name)],
+                     f"update: agent {name} escalation {old} -> {chain} by {args.as_name}",
+                     args.as_name)
+    print(f"updated '{name}' escalation: {old} -> {chain}")
+    print("open questions pick up the new chain at their next deadline breach")
+
+
 def cmd_status(args):
     repo = open_repo(args)
     repo.sync()
@@ -1699,6 +1732,10 @@ def cmd_quickstart(args):
             repo=getattr(args, "repo", None), name=name, human=args.human,
             topics=args.topics or "", escalation=args.escalation)
         cmd_join(join_args)
+    elif not is_human and args.escalation is not None:
+        print(f"note: '{name}' already joined, so --escalation was not applied — "
+              f"use: collab.py update --name {name} --as {name} --escalation …",
+              file=sys.stderr)
     me = name
     print(f"""
 you are: {me} ({'human' if is_human else 'agent'})
@@ -1867,6 +1904,16 @@ def main():
     p.add_argument("--as", dest="as_name", required=True,
                    help="the agent itself or its responsible human")
     p.set_defaults(func=cmd_retire)
+
+    p = sub.add_parser("update", help="change an agent's escalation chain after it joined",
+                       parents=[common])
+    p.add_argument("--name", required=True, help="agent to update")
+    p.add_argument("--as", dest="as_name", required=True,
+                   help="the agent itself or its responsible human")
+    p.add_argument("--escalation", required=True,
+                   help="comma-separated human handles, in order; replaces the "
+                        "whole chain ('' clears it)")
+    p.set_defaults(func=cmd_update)
 
     p = sub.add_parser("sweep", help="apply overdue deadlines (escalate/expire)",
                        parents=[common])

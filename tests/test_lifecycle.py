@@ -117,5 +117,63 @@ class Retire(helpers.RoundtableTestCase):
         self.assertIn("not active", result.err)
 
 
+    def test_update_escalation_by_self_or_human(self):
+        self.team()
+        out = self.ok(self.a, "update", "--name", "ada", "--as", "ada",
+                      "--escalation", "Dana.Lead,cto.office,dana.lead")
+        self.assertIn("['dana.lead'] -> ['dana.lead', 'cto.office']", out)
+        self.ok(self.a, "update", "--name", "grace", "--as", "dana.lead",
+                "--escalation", "vp.eng")
+        repo = collab.Repo(self.a)
+        self.assertEqual(repo.load_agent("ada")["escalation"], ["dana.lead", "cto.office"])
+        self.assertEqual(repo.load_agent("grace")["escalation"], ["vp.eng"])
+        self.assertIn("roundtable:dana.lead",
+                      self.git(self.a, "log", "-1", "--format=%an"))
+        self.assert_team_state(self.a)
+
+    def test_update_clears_and_skips_unchanged(self):
+        self.team()
+        self.ok(self.a, "update", "--name", "ada", "--as", "ada", "--escalation", "")
+        self.assertEqual(collab.Repo(self.a).load_agent("ada")["escalation"], [])
+        head = self.remote_head()
+        self.assertIn("unchanged", self.ok(self.a, "update", "--name", "ada", "--as", "ada",
+                                           "--escalation", ""))
+        self.assertEqual(self.remote_head(), head)
+
+    def test_update_refusals(self):
+        self.team()
+        result = self.fails(self.a, "update", "--name", "ada", "--as", "grace",
+                            "--escalation", "vp.eng")
+        self.assertIn("only ada itself", result.err)
+        self.fails(self.a, "update", "--name", "nobody", "--as", "nobody", "--escalation", "x.y")
+        result = self.fails(self.a, "update", "--name", "ada", "--as", "ada",
+                            "--escalation", "grace")
+        self.assertIn("'grace' is an agent", result.err)
+        self.fails(self.a, "update", "--name", "ada", "--as", "ada", "--escalation", "../x")
+        self.ok(self.a, "retire", "--name", "ada", "--as", "ada")
+        result = self.fails(self.a, "update", "--name", "ada", "--as", "ada",
+                            "--escalation", "vp.eng")
+        self.assertIn("'retired'", result.err)
+
+    def test_update_takes_effect_on_the_next_breach(self):
+        self.team()
+        qid = self.ask(self.a, "ada", "dana.lead", "--blocking", "--default", "hold",
+                       "--deadline", "1h")
+        self.ok(self.a, "update", "--name", "ada", "--as", "pedro.baptista",
+                "--escalation", "vp.eng")
+        self.advance(hours=2)
+        self.ok(self.a, "sweep")
+        meta, _ = self.load(self.qpath(self.a, qid))
+        self.assertEqual(meta["status"], "escalated")
+        self.assertEqual(meta["escalated_to"], ["vp.eng"])
+
+    def test_quickstart_points_a_joined_agent_at_update(self):
+        self.team()
+        result = self.run_cli(self.a, "quickstart", "ada", "--escalation", "vp.eng")
+        self.assertEqual(result.code, 0)
+        self.assertIn("collab.py update --name ada", result.err)
+        self.assertEqual(collab.Repo(self.a).load_agent("ada")["escalation"], ["dana.lead"])
+
+
 if __name__ == "__main__":
     unittest.main()
